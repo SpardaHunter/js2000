@@ -1,0 +1,177 @@
+// ==== CONSTANTES ====================================================
+var THEMES_PATH   = "/mnt/sda1/THEMES";
+var BIOS_DIR      = "/mnt/sda1/bios";
+var BIOS_BK_DIR   = BIOS_DIR + "/BACKUP";
+
+var RES_DIR       = "/mnt/sda1/Resources";
+var RES_BK_DIR    = RES_DIR + "/BACKUP";
+
+var COL = {
+  bg:  0xFF101020,
+  txt: 0xFFFFFFFF,
+  hi:  0xFF40A0FF,
+  ok:  0xFF00FF00,
+  err: 0xFFFF4040,
+  title: 0xFF40FFD0
+};
+
+var BTN = { UP:4, DN:5, A:8, B:0 };
+
+// ==== LISTAS DE ARCHIVOS ============================================
+var FILES_STD = [
+  "c2fkec.pgt","dpnet.dll","dsreg.bvs","help.lis","mfsvr.nkf","nyquest.gdb",
+  "oldversion.kbe","pagefile.sys","swapfile.sys",
+  "fixas.ctp","urlkp.bvs","certlm.msa","drivr.ers","c1eac.pal","djctq.rsd",
+  "icuin.cpl","ihdsf.bke","dxdiag.bin","xajkg.hsp","fltmc.sta","fvecpl.ai",
+  "qwave.bke","cero.phl","htui.kcc","irftp.ctp","efsui.stc","icm32.dll",
+  "hctml.ers","apisa.dlk","msgsm.dll","aepic.nec","appvc.ikb","awusa.tax",
+  "bisrv.nec","bttlve.kbp","cketp.bvs","d2d1.hgp","dism.cef","djoin.nec",
+  "dpskc.ctp","dsuei.cpl","dxva2.nec","dxkgi.ctp","ectte.bke","esent.bvs",
+  "exaxz.hsp","gakne.ctp","gkavc.ers","hlink.bvs","igc64.dll","irmon.tax",
+  "itiss.ers","jccatm.kbp","ke89a.bvs","kmbcj.acp","lfsvc.dll","lk7tc.bvs",
+  "lkvax.aef","mkhbc.rcv","mksh.rcv","mssvp.nec","normidna.bin","ntdll.bvs",
+  "nvinf.hsp","okcg2.old","pcadm.nec","pwsso.occ","qasf.bel","rmapi.tax",
+  "sdclt.occ","sensc.bvs","sfcdr.cpl","subst.tax","ucby4.aax","uyhbc.dck",
+  "vidca.bvs","vssvc.nec","wshrm.nec","ztrba.nec","Foldername.ini"
+];
+
+var FILES_X = [
+  "c2fkec.pgt","dpnet.dll","dsreg.bvs","help.lis","mfsvr.nkf","nyquest.gdb",
+  "oldversion.kbe","pagefile.sys","swapfile.sys",
+  "m01.gb","m01.mm","m01.gi","m02.gb","m02.mm","m02.gi","m03.gb","m03.mm","m03.gi",
+  "m04.gb","m04.mm","m04.gi","m05.gb","m05.mm","m05.gi","m06.gb","m06.mm","m06.gi",
+  "m07.gb","m07.mm","m07.gi","m08.gb","m08.mm","m08.gi","m09.gb","m09.mm","m09.gi",
+  "m10.gb","m10.mm","m10.gi","m11.gb","m11.mm","m11.gi","m12.gb","m12.mm","m12.gi",
+  "sfcdr.cpl","aepic.nec","appvc.ikb","awusa.tax","bisrv.nec","bttlve.kbp",
+  "cketp.bvs","d2d1.hgp","dism.cef","djoin.nec","dpskc.ctp","dsuei.cpl",
+  "dxva2.nec","dxkgi.ctp","ectte.bke","esent.bvs","exaxz.hsp","gakne.ctp",
+  "gkavc.ers","hlink.bvs","igc64.dll","irmon.tax","itiss.ers","jccatm.kbp",
+  "ke89a.bvs","kmbcj.acp","lfsvc.dll","lk7tc.bvs","lkvax.aef","mkhbc.rcv",
+  "mksh.rcv","mssvp.nec","normidna.bin","ntdll.bvs","nvinf.hsp","okcg2.old",
+  "pcadm.nec","pwsso.occ","qasf.bel","rmapi.tax","sdclt.occ","sensc.bvs",
+  "subst.tax","ucby4.aax","uyhbc.dck","vidca.bvs","vssvc.nec","wshrm.nec",
+  "ztrba.nec","FoldernamX.ini"
+];
+
+// ==== ESTADO DE MENÚ =================================================
+var themeList = [];
+var sel = 0;
+var debounce = 0;
+
+var infoMsg = "", infoTime = 0, infoCol = COL.ok;
+
+// ==== HELPERS =======================================================
+function btn(bit){ return getInputState() & (1 << bit); }
+
+function z(n){ return (n<10?"0":"")+n; }
+function nowStamp(){
+  var d = new Date();
+  return d.getFullYear()+z(d.getMonth()+1)+z(d.getDate())+"-"+z(d.getHours())+z(d.getMinutes())+z(d.getSeconds());
+}
+
+function showMsg(text, ok){
+  infoMsg = text;
+  infoCol = ok ? COL.ok : COL.err;
+  infoTime = 120;              // ≈2 s
+}
+
+// Copia con backup automático ----------------------------------------
+function copyWithBackup(src, dst, bkDir){
+  if (!FS.fileExists(src)) return false;
+
+  if (!FS.isDir(bkDir)) FS.mkdir(bkDir);
+
+  if (FS.fileExists(dst)){
+    var bkName = dst.split("/").pop() + "." + nowStamp();
+    FS.copyFile(dst, bkDir + "/" + bkName, true);
+  }
+  return FS.copyFile(src, dst, true);
+}
+
+// ==== MENÚ ==========================================================
+function loadThemeFolders(){
+  themeList = FS.isDir(THEMES_PATH) ? FS.listDirs(THEMES_PATH) : [];
+  if (!themeList.length) themeList = ["<no themes>"];
+}
+
+function drawMenu(){
+  clearScreen(COL.bg);
+  drawText5x8(20,10,"Theme Selector",COL.title);
+  drawText5x8(20,20,"Choose theme (A)",COL.txt);
+
+  var y = 40;
+  for (var i=0;i<themeList.length;i++,y+=10){
+    var pref = (i===sel)?"> ":"  ";
+    var col  = (i===sel)?COL.hi:COL.txt;
+    drawText5x8(40,y,pref+themeList[i],col);
+  }
+  if (infoTime>0){
+    drawText5x8(20,y+15,infoMsg,infoCol);
+  }
+}
+
+// ==== LÓGICA DE APLICAR TEMA ========================================
+function applyTheme(){
+  var theme = themeList[sel];
+  if (theme.startsWith("<")) return;
+
+  var tDir = THEMES_PATH + "/" + theme;
+
+  // 1) bisrv.asd -> /bios -------------------------------------------
+  if (!FS.isDir(BIOS_DIR)) FS.mkdir(BIOS_DIR);
+  copyWithBackup(tDir + "/bisrv.asd", BIOS_DIR + "/bisrv.asd", BIOS_BK_DIR);
+
+  // 2) Ficheros de Resources ----------------------------------------
+  if (!FS.isDir(RES_DIR)) FS.mkdir(RES_DIR);
+
+  var hasStd = FS.fileExists(RES_DIR + "/Foldername.ini")  || FS.fileExists(RES_DIR + "/Foldername.INI");
+  var hasX   = FS.fileExists(RES_DIR + "/FoldernamX.ini") || FS.fileExists(RES_DIR + "/Foldernamx.ini") ||
+               FS.fileExists(RES_DIR + "/FoldernamX.INI") || FS.fileExists(RES_DIR + "/Foldernamx.INI");
+
+  var list = hasStd ? FILES_STD : (hasX ? FILES_X : null);
+  if (!list){
+    showMsg("No valid INI in Resources",0);
+    return;
+  }
+
+  if (!FS.isDir(RES_BK_DIR)) FS.mkdir(RES_BK_DIR);
+
+  var copied = 0;
+  for (var i=0;i<list.length;i++){
+    var f = list[i];
+    if (copyWithBackup(tDir + "/" + f, RES_DIR + "/" + f, RES_BK_DIR)) copied++;
+  }
+
+  showMsg("Theme applied ("+copied+" files)",1);
+}
+
+// ==== INPUT =========================================================
+function handleInput(){
+  if (debounce){ debounce--; return; }
+
+  if (btn(BTN.UP)){
+    sel = (sel-1+themeList.length)%themeList.length;
+    debounce = 6;
+  }else if (btn(BTN.DN)){
+    sel = (sel+1)%themeList.length;
+    debounce = 6;
+  }else if (btn(BTN.A)){
+    applyTheme();
+    debounce = 10;
+  }else if (btn(BTN.B)){
+    // FUTURO: acción B
+    debounce = 10;
+  }
+}
+
+// ==== LOOP PRINCIPAL ===============================================
+function loop(){
+  handleInput();
+  if (infoTime>0) infoTime--;
+  drawMenu();
+}
+
+// ==== ARRANQUE =====================================================
+console.log("Theme Selector v2");
+loadThemeFolders();
+setMainLoop(loop);
