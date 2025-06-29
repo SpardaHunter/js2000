@@ -1,0 +1,266 @@
+/*-----------------------------------------------------------------------
+   • Menú  ↑/↓ + A   (ALL = procesa todos)
+   • Genera índices  .tax / .nec / .bvs
+   • Lee Foldername.ini / FoldernamX.ini
+-----------------------------------------------------------------------*/
+
+/* ==== CONSTANTES ==================================================== */
+var BASE_PATH = "/mnt/sda1";
+var RES_DIR   = BASE_PATH + "/Resources";
+
+var COL = { bg:0xFF101020, txt:0xFFFFFFFF, hi:0xFF40A0FF,
+            ok:0xFF00FF00, title:0xFF40FFD0 };
+
+var BTN = { UP:4, DN:5, A:8, B:0 };          // mapeo real SF2000
+
+var ROM_EXT = ["bkp","zip","zfc","zsf","zmd","zgb","zfb","smc","fig","sfc","gd3",
+               "gd7","dx2","bsx","swc","nes","nfc","fds","unf","gba","agb","gbz",
+               "gbc","gb","sgb","bin","md","smd","gen","sms"];
+
+/* ==== ESTADO ======================================================== */
+var systems = {};
+var menu    = ["ALL"];
+var sel = 0;
+
+var phase="menu";
+var todo=[], cur="", totalROMs=0, msg="";
+var debounce=0;
+
+/*  --- Estado incremental ---  */
+var procSys="", procRoms=[], procIdx=0, procAdded=0;
+var mF={}, mCN={}, mPY={};
+var BATCH=8;   // nº de ROMs a procesar por frame (≈ velocidad / parpadeo)
+
+/* ==== HELPERS ES5  ================================================== */
+function intLE4(n){return[n&255,(n>>8)&255,(n>>16)&255,(n>>24)&255];}
+function bytes(s){var a=[],i;for(i=0;i<s.length;i++)a.push(s.charCodeAt(i));return a;}
+function stripExt(n){var p=n.lastIndexOf(".");return p<0?n:n.slice(0,p);}  
+function ends(s,suf){return s.lastIndexOf(suf)===s.length-suf.length;}
+function isRom(n){
+  if (!n || typeof n !== "string") return false;
+  var l = n.toLowerCase();
+  for (var i = 0; i < ROM_EXT.length; i++) {
+    var ext = "." + ROM_EXT[i].toLowerCase();
+    if (l.endsWith(ext)) return true;
+  }
+  return false;
+}
+function sortSansExt(a){return a.slice().sort(function(x,y){var A=stripExt(x).toLowerCase(),B=stripExt(y).toLowerCase();return A<B?-1:(A>B?1:0);});}
+function btn(bit){return getInputState()&(1<<bit);}   // API consola
+function objVals(o){var r=[],k;for(k in o)r.push(o[k]);return r;}
+function extend(dst,src){var k;for(k in src)dst[k]=src[k];return dst;}
+
+/* ==== PLANTILLAS ==================================================== */
+var orderStd=["FC","SFC","MD","GB","GBC","GBA","ARCADE"];
+var orderX  =["FC","SFC","MD","GB","GBC","GBA","ARCADE",
+              "SEGA","ATARI_NGP","WONDERSWAN","PCE","MULTICORE"];
+
+var mapStd={ FC:["rdbui.tax","fhcfg.nec","nethn.bvs"],
+  SFC:["urefs.tax","adsnt.nec","xvb6c.bvs"], MD:["scksp.tax","setxa.nec","wmiui.bvs"],
+  GB:["vdsdc.tax","umboa.nec","qdvd6.bvs"],  GBC:["pnpui.tax","wjere.nec","mgdel.bvs"],
+  GBA:["vfnet.tax","htuiw.nec","sppnp.bvs"], ARCADE:["mswb7.tax","msdtc.nec","mfpmp.bvs"]};
+
+var mapX={ FC:["m01.ta","m01.ne","m01.bv"],  SFC:["m02.ta","m02.ne","m02.bv"],
+  MD:["m03.ta","m03.ne","m03.bv"],  GB:["m04.ta","m04.ne","m04.bv"],
+  GBC:["m05.ta","m05.ne","m05.bv"], GBA:["m06.ta","m06.ne","m06.bv"],
+  ARCADE:["m07.ta","m07.ne","m07.bv"], SEGA:["m08.ta","m08.ne","m08.bv"],
+  ATARI_NGP:["m09.ta","m09.ne","m09.bv"], WONDERSWAN:["m10.ta","m10.ne","m10.bv"],
+  PCE:["m11.ta","m11.ne","m11.bv"], MULTICORE:["m12.ta","m12.ne","m12.bv"]};
+
+/* ==== LECTOR DE .INI =============================================== */
+function loadIni(){
+  var paths=[RES_DIR+"/Foldername.ini",RES_DIR+"/Foldername.INI",
+             RES_DIR+"/Foldernamx.ini",RES_DIR+"/FoldernamX.ini"];
+  var txt=null, used="";
+  for(var i=0;i<paths.length;i++) if(FS.fileExists(paths[i])){ txt=FS.readTextFile(paths[i]); used=paths[i]; break; }
+
+  var variant = used.toLowerCase().indexOf("foldernamx")>=0 ? "x" : "std";
+  var baseMap = variant==="x" ? mapX : mapStd;
+  var baseOrd = variant==="x" ? orderX : orderStd;
+
+  if(!txt){ systems=extend({ALL:[]},baseMap); rebuildMenu(); return; }
+
+  var lines=txt.split(/\r?\n/), non=0, third="";
+  for(i=lines.length-1;i>=0&&non<3;i--) if(lines[i].trim()!==""){ non++; if(non===3) third=lines[i]; }
+  if(non<3){ fallback("short"); return; }
+
+  var num=parseInt(third.trim().split(/\s+/,2)[0],10);
+  if(isNaN(num)||num<=0){ fallback("bad num"); return; }
+
+  var tries=[num-1,num], aliases=null;
+  for(var t=0;t<tries.length;t++){
+    var n=tries[t]; if(n<1)continue;
+    var names=[], j=4;
+    while(j<lines.length&&names.length<n){ if(lines[j].trim()!=="") names.push(lines[j]); j++; }
+    if(names.length===n){
+      aliases=[]; for(var k=0;k<names.length;k++){
+        var p=names[k].trim().split(/\s+/,2); aliases.push(p.length>1?p[1]:p[0]);
+      }
+      break;
+    }
+  }
+  if(!aliases){ fallback("alias"); return; }
+
+  systems={}; for(i=0;i<aliases.length&&i<baseOrd.length;i++) systems[aliases[i]]=baseMap[baseOrd[i]];
+  systems.ALL=[];
+  rebuildMenu(); return;
+
+  function fallback(r){ console.log("INI fallback: "+r); systems=extend({ALL:[]},baseMap); rebuildMenu(); }
+}
+
+/* ==== MENÚ ========================================================== */
+function rebuildMenu(){ menu=["ALL"]; for(var k in systems) if(k!=="ALL") menu.push(k); }
+
+function drawMenu(){
+  clearScreen(COL.bg);
+  drawText5x8(20,10,"Frogtool Sparda",COL.title);
+  drawText5x8(20,20,"Choose system & press A",COL.txt);
+  var y=40;
+  for(var i=0;i<menu.length;i++,y+=10)
+    drawText5x8(40,y,(i===sel?"> ":"  ")+menu[i], i===sel?COL.hi:COL.txt);
+}
+
+/* ==== ÍNDICES ============================ */
+function ensureFile(p){ if(!FS.fileExists(p)) FS.writeFile(p,new Uint8Array([])); }
+
+function writeIndex(map, sorter, out){
+  var names=Object.keys(map).sort();
+  var data=[], ptrs={}, i;
+
+  /* build dictionary */
+  for(i=0; i<names.length; i++){
+    var name = names[i];
+    var val = map[name];
+    ptrs[val] = data.length;
+    data = data.concat(bytes(val), [0]);
+  }
+
+  /* header + offsets */
+  var sorted = sorter(objVals(map));
+  var header = intLE4(sorted.length);
+  for(i=0; i<sorted.length; i++) header = header.concat(intLE4(ptrs[sorted[i]]));
+
+  /* merge */
+  var u = new Uint8Array(header.length + data.length);
+  for(i=0; i<header.length; i++) u[i] = header[i];
+  for(i=0; i<data.length; i++) u[header.length + i] = data[i];
+
+  FS.writeFile(out, u);
+}
+
+/* ==== PROCESO INCREMENTAL ========================================== */
+function prepareSystem(sys){
+  cur = sys;                 // para la UI
+  procSys = sys;
+  procAdded = 0;
+  mF = {}; mCN = {}; mPY = {};
+  msg = "Scanning "+sys+" ...";
+
+  var dir = BASE_PATH+"/"+sys;
+  if(!FS.isDir(dir)){
+    console.log("Directory does not exist, creating: "+dir);
+    FS.mkdir(dir);
+    FS.mkdir(dir+"/save");
+  }
+
+  var idx = systems[sys];
+  for(var k=0;k<3;k++) if(idx[k]) ensureFile(RES_DIR+"/"+idx[k]);
+
+  var lst = FS.listFiles(dir) || [];
+  procRoms = lst.filter(isRom).sort();
+  procIdx  = 0;
+
+  if(procRoms.length===0) msg="No valid ROMs in "+sys;  // aún así grabamos índices vacíos
+}
+
+function processChunk(){
+  if(procSys===""){
+    /* cargar próximo sistema */
+    if(!todo.length){ phase="done"; return; }
+    prepareSystem(todo.shift());
+    return;   // esperamos al siguiente frame para procesar
+  }
+
+  /* procesar BATCH ROMs */
+  var start = procIdx;
+  var end   = Math.min(procIdx + BATCH, procRoms.length);
+  for(var i=start; i<end; i++){
+    var r = procRoms[i];
+    var c = stripExt(r);
+    mF[r]  = r;
+    mCN[r] = c;
+    mPY[r] = c;
+  }
+  procIdx = end;
+  totalROMs += (end - start);
+  procAdded = procIdx;
+  msg = "Processing "+procSys+" ("+procIdx+"/"+procRoms.length+")";
+
+  /* si hemos terminado el sistema… */
+  if(procIdx >= procRoms.length){
+    var idx = systems[procSys];
+    writeIndex(mF, sortSansExt,                  RES_DIR+"/"+idx[0]);
+    writeIndex(mCN, function(a,b){return a<b?-1:(a>b?1:0);}, RES_DIR+"/"+idx[1]);
+    writeIndex(mPY, function(a,b){return a<b?-1:(a>b?1:0);}, RES_DIR+"/"+idx[2]);
+
+    msg = "Done ("+procAdded+" ROMs)";
+    procSys = "";  // fuerza carga del siguiente sistema en el próximo frame
+  }
+}
+
+/* ==== PANTALLAS ===================================================== */
+function drawRun(){
+  clearScreen(COL.bg);
+  drawText5x8(20,10,"System: "+cur,COL.hi);
+  drawText5x8(20,25,msg,COL.txt);
+  drawText5x8(20,40,"Total ROMs: "+totalROMs,COL.txt);
+  drawText5x8(20,52,"B: Cancel",COL.txt);
+}
+function drawDone(){
+  clearScreen(COL.bg);
+  drawText5x8(20,10,"Update finished!",COL.ok);
+  drawText5x8(20,25,"Total ROMs: "+totalROMs,COL.txt);
+  drawText5x8(20,45,"A: Again    B: Menu",COL.txt);
+}
+
+/* ==== FSM & INPUT =================================================== */
+function handleInput(){
+  if(debounce){ debounce--; return; }
+  if(phase==="menu"){
+    if(btn(BTN.UP)){ sel=(sel-1+menu.length)%menu.length; debounce=6; }
+    else if(btn(BTN.DN)){ sel=(sel+1)%menu.length; debounce=6; }
+    else if(btn(BTN.A)){ startRun(); debounce=10; }
+  }else if(phase==="run"){
+    if(btn(BTN.B)){ phase="menu"; msg=""; procSys=""; debounce=10; }
+  }else if(phase==="done"){
+    if(btn(BTN.A)){ startRun(); debounce=10; }
+    else if(btn(BTN.B)){ phase="menu"; debounce=10; }
+  }
+}
+
+function startRun(){
+  phase="run"; totalROMs=0;
+  todo=(menu[sel]==="ALL")?menu.slice(1):[menu[sel]];
+  cur=""; msg="";
+  procSys=""; procRoms=[]; procIdx=0;
+}
+
+function stepRun(){
+  if(phase!=="run") return;
+  processChunk();   // procesa 0‑BATCH ROMs y actualiza msg/contadores
+}
+
+/* ==== MAIN LOOP ===================================================== */
+function loop(){
+  handleInput();
+  if(phase==="run") stepRun();
+
+  if(phase==="menu") drawMenu();
+  else if(phase==="run") drawRun();
+  else drawDone();
+}
+
+/* ==== ARRANQUE ====================================================== */
+console.log("Frogtool Sparda");
+loadIni();
+setMainLoop(loop);
